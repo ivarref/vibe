@@ -14,8 +14,11 @@ apt-get install -y --no-install-recommends      \
         libssl-dev                              \
         curl                                    \
         git                                     \
-        ripgrep
+        ripgrep                                 \
+        openssh-server
 
+# Setup sshd
+sed -ri 's/^#?PermitRootLogin\s+.*/PermitRootLogin yes/' /etc/ssh/sshd_config
 
 # Expand disk partition
 growpart /dev/vda 1
@@ -45,8 +48,26 @@ echo "export HISTSIZE=" >> .bashrc
 # Shutdown the VM when you logout
 cat > .bash_logout <<EOF
 history -w # Write bash history. Otherwise bash would be killed by poweroff without having written history
-systemctl poweroff
-sleep 100 # sleep here so that we don't see the login screen flash up before the shutdown.
+
+if [[ "\$(tty)" == "/dev/hvc0" ]]; then
+  # we are the primary terminal
+  if [[ "\$(who | wc -l)" == "1" ]]; then
+    # we are the last open terminal
+    echo "VM powering off..."
+    systemctl poweroff
+    sleep 100 # sleep here so that we don't see the login screen flash up before the shutdown.
+  else
+    echo ""
+    echo "vibe: not powering off as there are ssh sessions connected"
+  fi
+else
+  # we are a ssh session
+  if [[ "\$(who | wc -l)" == "1" ]]; then
+    # we are the last open terminal
+    echo "VM powering off..."
+    systemctl poweroff
+  fi
+fi
 EOF
 
 

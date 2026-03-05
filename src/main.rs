@@ -258,6 +258,11 @@ Options
         directory_shares.push(DirectoryShare::from_mount_spec(spec)?);
     }
 
+    // Share ssh keys and IP with host
+    login_actions.push(Send(" mkdir .vibe_ssh/ || true".to_string()));
+    login_actions.push(Send(" hostname -I | cut -d ' ' -f1 > .vibe_ssh/ip".to_string()));
+    login_actions.push(Send(" cp ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub .vibe_ssh/.".to_string()));
+
     // Enable bash history
     login_actions.push(Send(" export HISTFILE=/root/.bash_history".to_string()));
 
@@ -457,7 +462,7 @@ fn motd_login_action(directory_shares: &[DirectoryShare]) -> Option<LoginAction>
         ));
     }
 
-    let command = format!(" clear && cat <<'VIBE_MOTD'\n{output}\nVIBE_MOTD");
+    let command = format!(" cat > /etc/motd <<'VIBE_MOTD'\n{output}\nVIBE_MOTD\n clear && cat /etc/motd");
     Some(Send(command))
 }
 
@@ -1132,6 +1137,8 @@ fn run_vm(
             const S: &str = " sh -c '(while IFS=\" \" read -r rows cols; do stty -F /dev/hvc0 rows \"$rows\" cols \"$cols\"; done) < /dev/hvc1 >/dev/null 2>&1 &'";
             S.to_string()
         }),
+        Send(" [ -e \"~/.ssh/id_ed25519\" ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -q -N \"\"".to_string()),
+        Send(" [ -e \"~/.ssh/authorized_keys\" ] || cp ~/.ssh/id_ed25519.pub ~/.ssh/authorized_keys".to_string()),
     ];
 
     if !directory_shares.is_empty() {
