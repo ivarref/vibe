@@ -16,7 +16,8 @@ apt-get install -y --no-install-recommends      \
         git                                     \
         tmux                                    \
         sysstat                                 \
-        ripgrep
+        ripgrep                                 \
+        fish
 
 
 # Expand disk partition
@@ -85,7 +86,11 @@ done
 
 # Install Rust
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rustfmt,clippy"
+. "$HOME/.cargo/env"
 
+# Install bat
+cargo install bat
+echo 'export MANPAGER="bat -p -lman"' >> .bashrc
 
 # Install Mise
 curl https://mise.run | sh
