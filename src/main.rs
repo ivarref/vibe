@@ -197,6 +197,7 @@ fn attach_console(
         .to_string_lossy()
         .into_owned();
     all_actions.push(Send(format!(" cd {project_name}")));
+    all_actions.push(Send(" fish; logout ".to_string()));
 
     if clear {
         all_actions.push(Send(" clear && cat /etc/vibe_motd".to_string()));
@@ -855,7 +856,7 @@ Options
     };
 
     if !args.daemon {
-        parse_cli(true)?;
+        parse_cli(false)?;
         // We are the initial client.
         let hvc0_sock = instance_dir.join("hvc0.sock");
         if hvc0_sock.exists() {
@@ -896,7 +897,7 @@ Options
             }
             thread::sleep(Duration::from_millis(10));
         }
-        attach_console(project_root, parse_cli(true)?.login_actions, parse_cli(true)?.clear)
+        attach_console(project_root, parse_cli(false)?.login_actions, parse_cli(false)?.clear)
     } else {
         // We are the daemon process.
         // At this point the VM is provisioned. The VM is now powered off.

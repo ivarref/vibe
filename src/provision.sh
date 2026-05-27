@@ -53,6 +53,8 @@ export HISTSIZE=
 shopt -s histappend
 # Write history after every command
 PROMPT_COMMAND+=("history -a")
+
+export MANPAGER="sh -c 'sed -u -e \"s/\\x1B\[[0-9;]*m//g; s/.\\x08//g\" | bat -p -lman'"
 EOF
 
 # Shutdown the VM when you logout
@@ -90,7 +92,6 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rust
 
 # Install bat
 cargo install bat
-echo 'export MANPAGER="bat -p -lman"' >> .bashrc
 
 # Install Mise
 curl https://mise.run | sh
