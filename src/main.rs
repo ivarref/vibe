@@ -651,7 +651,21 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
                 .expect("Project directory must exist"),
         );
 
-        for subfolder in [".venv", "node_modules", "target", ".cpcache"] {
+        if env::current_dir()?.join("pyproject.toml").exists() {
+            let subfolder = ".venv";
+            fs::create_dir_all(env::current_dir()?.join(".vibe").join(subfolder))
+                .expect("Could not create .vibe/ subfolder");
+            directory_shares.push(
+                DirectoryShare::new(
+                    env::current_dir()?.join(".vibe").join(subfolder),
+                    PathBuf::from("/root").join(project_name.clone()).join(subfolder),
+                    false,
+                )
+                    .expect("Project directory must exist"),
+            );
+        }
+
+        for subfolder in ["node_modules", "target", ".cpcache"] {
             if env::current_dir()?.join(subfolder).exists() {
                 // println!(r"creating mapping {}", subfolder);
                 fs::create_dir_all(env::current_dir()?.join(".vibe").join(subfolder))
