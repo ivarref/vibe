@@ -652,7 +652,7 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         }
 
         directory_shares.push(
-            DirectoryShare::new(project_root, PathBuf::from("/root/").join(project_name.clone()), false)
+            DirectoryShare::new(project_root.clone(), PathBuf::from("/root/").join(project_name.clone()), false)
                 .expect("Project directory must exist"),
         );
 
@@ -736,6 +736,14 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
 
     // Enable bash history
     // login_actions.push(Send(" export HISTFILE=/root/.bash_history".to_string()));
+
+    // Announce the VM over mDNS as <project-name>.local, so it's reachable by name from the Mac.
+    // Only avahi's published name changes; the hostname (and prompt) stays "vibe".
+    if let Some(name) = project_root.file_name().map(|n| mdns_host_name(&n.to_string_lossy())) {
+        login_actions.push(Send(format!(
+            " [ -f /etc/avahi/avahi-daemon.conf ] && sed -i 's/^#\\?host-name=.*/host-name={name}/' /etc/avahi/avahi-daemon.conf && systemctl restart avahi-daemon"
+        )));
+    }
 
     if let Some(motd_action) = create_motd(args.clone(), &directory_shares) {
         login_actions.push(motd_action);
@@ -1096,6 +1104,18 @@ fn script_command_from_content(
         );
     }
     Ok(command)
+}
+
+/// Turn a directory name into a valid DNS label for mDNS.
+fn mdns_host_name(name: &str) -> String {
+    let label: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let label = label.trim_matches('-');
+    let label = label[..label.len().min(63)].trim_end_matches('-');
+    if label.is_empty() { "vibe".to_string() } else { label.to_string() }
 }
 
 fn create_motd(args: CliArgs, directory_shares: &[DirectoryShare]) -> Option<LoginAction> {

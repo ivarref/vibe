@@ -19,6 +19,7 @@ apt-get install -y --no-install-recommends      \
         ripgrep                                 \
         fish                                    \
         inotify-tools                           \
+        avahi-daemon                            \
         ca-certificates
 
 
