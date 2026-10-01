@@ -20,6 +20,7 @@ apt-get install -y --no-install-recommends      \
         fish                                    \
         inotify-tools                           \
         avahi-daemon                            \
+        socat                                   \
         ca-certificates
 
 
