@@ -29,7 +29,9 @@ use objc2_foundation::*;
 use objc2_virtualization::*;
 use single_instance::SingleInstance;
 
+mod file_events;
 mod networking;
+use file_events::*;
 use networking::*;
 const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
 const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
@@ -629,6 +631,8 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
 
     let mut login_actions = Vec::new();
     let mut directory_shares = Vec::new();
+    // Guest paths hidden under tmpfs, so host changes there shouldn't be forwarded.
+    let mut masked_guest_paths = Vec::new();
 
     if !args.no_default_mounts {
         let project_name = project_root
@@ -643,6 +647,7 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         for subfolder in [".git", ".vibe"] {
             if project_root.join(subfolder).exists() {
                 login_actions.push(Send(format!(r" mount -t tmpfs tmpfs /root/{project_name}/{}", subfolder)));
+                masked_guest_paths.push(PathBuf::from("/root").join(&project_name).join(subfolder));
             }
         }
 
@@ -710,8 +715,23 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         ));
     }
 
+    let first_user_mount = directory_shares.len();
     for spec in &args.mounts {
         directory_shares.push(DirectoryShare::from_mount_spec(spec)?);
+    }
+
+    // Forward host file changes for the project directory and user mounts; the other default
+    // shares are caches and config dirs that nobody watches, but may see lots of churn.
+    let mut watched_shares = Vec::new();
+    for (i, share) in directory_shares.iter().enumerate() {
+        if (i == 0 && !args.no_default_mounts) || i >= first_user_mount {
+            watched_shares.push(WatchedShare {
+                host: share.host.clone(),
+                guest: share.guest.clone(),
+            });
+        } else {
+            masked_guest_paths.push(share.guest.clone());
+        }
     }
 
     // Enable bash history
@@ -747,6 +767,8 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         args.cpu_count,
         args.ram_bytes,
         instance_dir.join("console.sock"),
+        watched_shares,
+        masked_guest_paths,
     )
 }
 
@@ -1531,6 +1553,8 @@ fn create_vm_configuration(
     vm_resize_writes_to_fd: OwnedFd,
     // Each entry adds one hvcN (bidirectional) + one hvcN+1 (resize read-only) serial port.
     extra_consoles: Vec<(OwnedFd, OwnedFd, OwnedFd)>,
+    // Host->guest port carrying changed file paths (see file_events.rs).
+    file_events_reads_from: Option<OwnedFd>,
     cpu_count: usize,
     ram_bytes: u64,
 ) -> Result<Retained<VZVirtualMachineConfiguration>, Box<dyn std::error::Error>> {
@@ -1730,6 +1754,34 @@ fn create_vm_configuration(
         }
 
         ////////////////////////////
+        // File change events port
+        // Linux only creates /dev/hvc0..7 and those are all taken by the serial ports above, so this
+        // is a named port on a separate console device, showing up as /dev/virtio-ports/<name>.
+        if let Some(file_events_reads_from) = file_events_reads_from {
+            let read_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+                NSFileHandle::alloc(),
+                file_events_reads_from.into_raw_fd(),
+                true,
+            );
+            let attachment =
+                VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+                    VZFileHandleSerialPortAttachment::alloc(),
+                    Some(&read_handle),
+                    None,
+                );
+            let port = VZVirtioConsolePortConfiguration::new();
+            port.setName(Some(&NSString::from_str(FILE_EVENTS_PORT_NAME)));
+            port.setIsConsole(false);
+            port.setAttachment(Some(&attachment));
+
+            let console_device = VZVirtioConsoleDeviceConfiguration::new();
+            console_device.ports().setObject_atIndexedSubscript(Some(&port), 0);
+            config.setConsoleDevices(&NSArray::from_retained_slice(&[Retained::into_super(
+                console_device,
+            )]));
+        }
+
+        ////////////////////////////
         // Validate
         config.validateWithError().map_err(|e| {
             io::Error::other(format!(
@@ -1804,12 +1856,15 @@ fn run_vm_daemon(
     cpu_count: usize,
     ram_bytes: u64,
     console_path: PathBuf,
+    watched_shares: Vec<WatchedShare>,
+    masked_guest_paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (vm_reads_from, host_writes_to) = create_pipe(); // hvc0 host->guest
     let (we_read_from, vm_writes_to) = create_pipe(); // hvc0 host<-guest
     let (vm_reads_resize_from, host_write_resize_to) = create_pipe(); // hvc1 host->guest
     let (host_reads_disconnect_request, vm_writes_resize_to) = create_pipe(); // hvc1 host<-guest
     let (hvc0_disconnect_read, hvc0_disconnect_write) = create_pipe(); // hvc1 exit => attached console
+    let (vm_reads_file_events_from, host_writes_file_events_to) = create_pipe(); // /dev/virtio-ports/vibe-file-events host->guest
 
     // hvc2/hvc3, hvc4/hvc5, hvc6/hvc7 — one console+resize pair per attach slot.
     const N_CONSOLE_SLOTS: usize = 3;
@@ -1839,6 +1894,7 @@ fn run_vm_daemon(
         vm_reads_resize_from,
         vm_writes_resize_to,
         vm_extra_consoles,
+        Some(vm_reads_file_events_from),
         cpu_count,
         ram_bytes,
     )?;
@@ -1927,6 +1983,12 @@ fn run_vm_daemon(
             all_login_actions.push(Send(format!(" mkdir -p {}", guest)));
             all_login_actions.push(Send(format!(" mount --bind {} {}", staging, guest)));
         }
+
+        all_login_actions.push(Send(script_command_from_content(
+            "file_events_guest",
+            &guest_script(&watched_shares, &masked_guest_paths),
+        )?));
+        spawn_host_change_forwarder(watched_shares, masked_guest_paths, host_writes_file_events_to);
     }
 
     all_login_actions.push(Send(script_command_from_content(
@@ -2113,6 +2175,7 @@ fn run_vm_provision(
         vm_reads_resize_from,
         vm_writes_resize_to,
         vec![],
+        None,
         cpu_count,
         ram_bytes,
     )?;

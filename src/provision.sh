@@ -18,6 +18,7 @@ apt-get install -y --no-install-recommends      \
         sysstat                                 \
         ripgrep                                 \
         fish                                    \
+        inotify-tools                           \
         ca-certificates
 
 
