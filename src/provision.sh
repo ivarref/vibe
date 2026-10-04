@@ -21,6 +21,7 @@ apt-get install -y --no-install-recommends      \
         inotify-tools                           \
         avahi-daemon                            \
         socat                                   \
+        batcat                                  \
         ca-certificates
 
 
@@ -123,7 +124,7 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rust
 . "$HOME/.cargo/env"
 
 # Install bat
-cargo install bat
+ln -sf "$(which batcat)" "$HOME/.local/bin/bat"
 
 # Install Mise
 curl https://mise.run | sh

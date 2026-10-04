@@ -35,9 +35,9 @@ mod port_forwarding;
 use file_events::*;
 use networking::*;
 use port_forwarding::*;
-const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
-const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
-const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
+const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-nocloud-amd64-20261001-2618.tar.xz";
+const DEBIAN_COMPRESSED_SHA: &str = "6dcba42b3ef3f23960a0d1f6845d6bb997e10a1960b9baeeaf6af6ec83da20a0187308518ade51065bb0663ff5754beed82f955df370cc5f94201db8a86127a9";
+const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 304621776;
 const SHARED_DIRECTORIES_TAG: &str = "shared";
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
