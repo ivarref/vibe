@@ -782,6 +782,8 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         instance_dir.join("console.sock"),
         watched_shares,
         masked_guest_paths,
+        // Stable across projects, so /var/run/docker.sock can be symlinked to it once.
+        cache_dir.join("docker.sock"),
     )
 }
 
@@ -1940,6 +1942,7 @@ fn run_vm_daemon(
     console_path: PathBuf,
     watched_shares: Vec<WatchedShare>,
     masked_guest_paths: Vec<PathBuf>,
+    docker_socket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (vm_reads_from, host_writes_to) = create_pipe(); // hvc0 host->guest
     let (we_read_from, vm_writes_to) = create_pipe(); // hvc0 host<-guest
@@ -2085,7 +2088,9 @@ fn run_vm_daemon(
         .ok_or("VM has no socket device")?;
     // Safety: the only socket device we configure is a VZVirtioSocketDeviceConfiguration.
     let socket_device = unsafe { Retained::cast_unchecked::<VZVirtioSocketDevice>(socket_device) };
-    spawn_port_forwarder(socket_device, host_reads_port_reports);
+    let vsock_device = VsockDevice::new(socket_device);
+    spawn_port_forwarder(Arc::clone(&vsock_device), host_reads_port_reports);
+    let serving_docker_socket = spawn_docker_socket_forwarder(vsock_device, &docker_socket_path);
 
     all_login_actions.push(Send(script_command_from_content(
         "bash_logout.sh",
@@ -2243,6 +2248,9 @@ fn run_vm_daemon(
         .chain(RESIZE_SOCK_NAMES.iter())
     {
         let _ = fs::remove_file(base.with_file_name(name));
+    }
+    if serving_docker_socket {
+        let _ = fs::remove_file(&docker_socket_path);
     }
 
     exit_result

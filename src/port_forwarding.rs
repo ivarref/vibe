@@ -6,16 +6,19 @@
 // each connection over vsock. Going over vsock rather than the VM's IP reaches servers that only
 // listen on the guest's loopback interface (the default for most dev servers), and works the same
 // in every network mode.
+//
+// The guest's Docker socket is forwarded the same way, to a Unix socket on the host.
 
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{self, BufRead, BufReader},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     os::{
         fd::{FromRawFd, OwnedFd},
-        unix::net::UnixStream,
+        unix::net::{UnixListener, UnixStream},
     },
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -34,12 +37,22 @@ use objc2_virtualization::{VZVirtioSocketConnection, VZVirtioSocketDevice};
 pub const PORT_REPORTS_PORT_NAME: &str = "vibe-ports";
 pub const PORT_FORWARDING_GUEST_SCRIPT: &str = include_str!("port_forwarding_guest.sh");
 
+// Above the TCP port range, which the port forwarding relays use as vsock ports.
+// Must match the port in port_forwarding_guest.sh.
+const DOCKER_VSOCK_PORT: u32 = 100_000;
+
 const VSOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // The device may only be used from the VM's queue (the main queue); we only ever touch it there.
-struct SocketDevice(Retained<VZVirtioSocketDevice>);
-unsafe impl Send for SocketDevice {}
-unsafe impl Sync for SocketDevice {}
+pub struct VsockDevice(Retained<VZVirtioSocketDevice>);
+unsafe impl Send for VsockDevice {}
+unsafe impl Sync for VsockDevice {}
+
+impl VsockDevice {
+    pub fn new(device: Retained<VZVirtioSocketDevice>) -> Arc<Self> {
+        Arc::new(Self(device))
+    }
+}
 
 struct Forward {
     stop: Arc<AtomicBool>,
@@ -48,7 +61,7 @@ struct Forward {
 }
 
 impl Forward {
-    fn start(device: &Arc<SocketDevice>, port: u16) -> Option<Self> {
+    fn start(device: &Arc<VsockDevice>, port: u16) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let mut addrs = Vec::new();
         let mut threads = Vec::new();
@@ -69,7 +82,7 @@ impl Forward {
                     let Ok(stream) = stream else { continue };
                     let device = Arc::clone(&device);
                     thread::spawn(move || {
-                        if let Some(vsock) = vsock_connect_with_retry(&device, port) {
+                        if let Some(vsock) = vsock_connect_with_retry(&device, port as u32) {
                             relay(stream, UnixStream::from(vsock));
                         }
                     });
@@ -98,7 +111,7 @@ impl Forward {
 }
 
 // The guest reports a port right after starting its relay, which may not be listening yet.
-fn vsock_connect_with_retry(device: &Arc<SocketDevice>, port: u16) -> Option<OwnedFd> {
+fn vsock_connect_with_retry(device: &Arc<VsockDevice>, port: u32) -> Option<OwnedFd> {
     for _ in 0..100 {
         if let Some(fd) = vsock_connect(device, port) {
             return Some(fd);
@@ -108,7 +121,7 @@ fn vsock_connect_with_retry(device: &Arc<SocketDevice>, port: u16) -> Option<Own
     None
 }
 
-fn vsock_connect(device: &Arc<SocketDevice>, port: u16) -> Option<OwnedFd> {
+fn vsock_connect(device: &Arc<VsockDevice>, port: u32) -> Option<OwnedFd> {
     let (tx, rx) = mpsc::channel::<Option<OwnedFd>>();
     let device = Arc::clone(device);
     DispatchQueue::main().exec_async(move || {
@@ -126,28 +139,75 @@ fn vsock_connect(device: &Arc<SocketDevice>, port: u16) -> Option<OwnedFd> {
         unsafe {
             device
                 .0
-                .connectToPort_completionHandler(port as u32, &completion_handler)
+                .connectToPort_completionHandler(port, &completion_handler)
         };
     });
     rx.recv_timeout(VSOCK_CONNECT_TIMEOUT).ok().flatten()
 }
 
-fn relay(tcp: TcpStream, vsock: UnixStream) {
-    let (Ok(mut tcp_read), Ok(mut vsock_write)) = (tcp.try_clone(), vsock.try_clone()) else {
+trait Stream: Read + Write + Send + Sized + 'static {
+    fn try_clone(&self) -> io::Result<Self>;
+    fn shutdown_write(&self);
+}
+
+impl Stream for TcpStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        TcpStream::try_clone(self)
+    }
+    fn shutdown_write(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+impl Stream for UnixStream {
+    fn try_clone(&self) -> io::Result<Self> {
+        UnixStream::try_clone(self)
+    }
+    fn shutdown_write(&self) {
+        let _ = self.shutdown(Shutdown::Write);
+    }
+}
+
+fn relay(client: impl Stream, vsock: UnixStream) {
+    let (Ok(mut client_read), Ok(mut vsock_write)) = (client.try_clone(), vsock.try_clone()) else {
         return;
     };
     let upstream = thread::spawn(move || {
-        let _ = io::copy(&mut tcp_read, &mut vsock_write);
-        let _ = vsock_write.shutdown(Shutdown::Write);
+        let _ = io::copy(&mut client_read, &mut vsock_write);
+        vsock_write.shutdown_write();
     });
-    let (mut vsock_read, mut tcp_write) = (vsock, tcp);
-    let _ = io::copy(&mut vsock_read, &mut tcp_write);
-    let _ = tcp_write.shutdown(Shutdown::Write);
+    let (mut vsock_read, mut client_write) = (vsock, client);
+    let _ = io::copy(&mut vsock_read, &mut client_write);
+    client_write.shutdown_write();
     let _ = upstream.join();
 }
 
-pub fn spawn_port_forwarder(device: Retained<VZVirtioSocketDevice>, guest_reports: OwnedFd) {
-    let device = Arc::new(SocketDevice(device));
+/// Serve the guest's Docker socket at `path` on the host. Returns false if another VM is already
+/// serving it (only one can), or the socket couldn't be created.
+pub fn spawn_docker_socket_forwarder(device: Arc<VsockDevice>, path: &Path) -> bool {
+    if UnixStream::connect(path).is_ok() {
+        return false;
+    }
+    // Left over from a VM that didn't shut down cleanly.
+    let _ = fs::remove_file(path);
+    let Ok(listener) = UnixListener::bind(path) else {
+        return false;
+    };
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let device = Arc::clone(&device);
+            thread::spawn(move || {
+                if let Some(vsock) = vsock_connect_with_retry(&device, DOCKER_VSOCK_PORT) {
+                    relay(stream, UnixStream::from(vsock));
+                }
+            });
+        }
+    });
+    true
+}
+
+pub fn spawn_port_forwarder(device: Arc<VsockDevice>, guest_reports: OwnedFd) {
     thread::spawn(move || {
         let mut forwards: HashMap<u16, Forward> = HashMap::new();
         for line in BufReader::new(File::from(guest_reports)).lines() {

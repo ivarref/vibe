@@ -7,6 +7,10 @@
 # dies), fall back to polling every second.
 (
     exec 3> /dev/virtio-ports/vibe-ports
+
+    # The host serves Docker's socket by connecting to this vsock port (DOCKER_VSOCK_PORT in
+    # port_forwarding.rs). Connections fail until dockerd is up, which is fine.
+    socat VSOCK-LISTEN:100000,fork UNIX-CONNECT:/var/run/docker.sock &
     declare -A relays current
 
     sync_ports() {
