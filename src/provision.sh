@@ -7,6 +7,10 @@ echo 'Acquire::https::Timeout "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 echo 'Acquire::Retries "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 
 apt-get update
+
+# Upgrade to the latest trixie kernel; it takes effect from the next boot.
+DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-arm64
+
 apt-get install -y --no-install-recommends      \
         cloud-guest-utils                       \
         build-essential                         \
@@ -21,9 +25,10 @@ apt-get install -y --no-install-recommends      \
         inotify-tools                           \
         avahi-daemon                            \
         socat                                   \
-        batcat                                  \
+        bat                                     \
+        bpftrace                                \
+        netcat-openbsd                          \
         ca-certificates
-
 
 # Install docker (from https://docs.docker.com/engine/install/debian/)
 # apt update # already present above
@@ -123,7 +128,8 @@ done
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --component "rustfmt,clippy"
 . "$HOME/.cargo/env"
 
-# Install bat
+# Install bat (Debian names the binary batcat)
+mkdir -p "$HOME/.local/bin"
 ln -sf "$(which batcat)" "$HOME/.local/bin/bat"
 
 # Install Mise
@@ -157,5 +163,4 @@ MISE
 touch .config/mise/mise.lock
 mise install
 
-# Done provisioning, power off the VM
-systemctl poweroff
+# Done provisioning. vibe powers off the VM after checking that this script succeeded.

@@ -35,9 +35,12 @@ mod port_forwarding;
 use file_events::*;
 use networking::*;
 use port_forwarding::*;
-const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-nocloud-amd64-20261001-2618.tar.xz";
-const DEBIAN_COMPRESSED_SHA: &str = "6dcba42b3ef3f23960a0d1f6845d6bb997e10a1960b9baeeaf6af6ec83da20a0187308518ade51065bb0663ff5754beed82f955df370cc5f94201db8a86127a9";
-const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 304621776;
+// Newer builds (e.g. 20261001-2618) ship with an uninitialized machine-id and a locked root account,
+// so they stop at systemd-firstboot's interactive wizard and never reach the login prompt.
+// Stay on this build; provision.sh upgrades the kernel to the latest one.
+const DEBIAN_COMPRESSED_DISK_URL: &str = "https://cloud.debian.org/images/cloud/trixie/20260112-2355/debian-13-nocloud-arm64-20260112-2355.tar.xz";
+const DEBIAN_COMPRESSED_SHA: &str = "6ab9be9e6834adc975268367f2f0235251671184345c34ee13031749fdfbf66fe4c3aafd949a2d98550426090e9ac645e79009c51eb0eefc984c15786570bb38";
+const DEBIAN_COMPRESSED_SIZE_BYTES: u64 = 280901576;
 const SHARED_DIRECTORIES_TAG: &str = "shared";
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
@@ -928,7 +931,7 @@ Options
             // .stderr(log_file)
             .spawn()?;
 
-        let deadline = Instant::now() + Duration::from_secs(300); // 5 minute timeout
+        let deadline = Instant::now() + Duration::from_secs(600); // 10 minute timeout
         // TODO don't spin?
         while !hvc0_sock.exists() {
             match child.try_wait() {
@@ -1242,6 +1245,9 @@ impl OutputMonitor {
         }
     }
 
+    fn contains(&self, needle: &str) -> bool {
+        self.buffer.lock().unwrap().contains(needle)
+    }
 }
 
 fn ensure_base_image(
@@ -1322,24 +1328,40 @@ fn ensure_default_image(
 
     ensure_base_image(base_raw, base_compressed)?;
 
+    // Provision into a separate file and only move it into place once provisioning succeeded,
+    // so an interrupted or failed run isn't mistaken for a finished image next time.
+    let provisioning_raw = default_raw.with_file_name("default.raw.provisioning");
+    let _ = fs::remove_file(&provisioning_raw);
+
     println!("Configuring base image...");
-    fs::copy(base_raw, default_raw)?;
+    fs::copy(base_raw, &provisioning_raw)?;
 
     fs::OpenOptions::new()
         .write(true)
-        .open(default_raw)?
+        .open(&provisioning_raw)?
         // resize to 20GiB
         .set_len(20 * 1024 * BYTES_PER_MB)?;
 
-    let provision_command = script_command_from_content("provision.sh", PROVISION_SCRIPT)?;
-    run_vm_provision(
-        default_raw,
+    // Power off whether or not provisioning succeeded; the marker tells us which.
+    // (Split in two so the echoed command line itself doesn't contain it.)
+    let provision_command = format!(
+        "{} && echo VIBE_PROVISION_\"\"OK; systemctl poweroff",
+        script_command_from_content("provision.sh", PROVISION_SCRIPT)?
+    );
+    let result = run_vm_provision(
+        &provisioning_raw,
         &[Send(provision_command)],
+        "VIBE_PROVISION_OK",
         directory_shares,
         prepare_network_backend,
         DEFAULT_CPU_COUNT,
         DEFAULT_RAM_BYTES,
-    )?;
+    );
+    if let Err(err) = result {
+        let _ = fs::remove_file(&provisioning_raw);
+        return Err(err);
+    }
+    fs::rename(&provisioning_raw, default_raw)?;
 
     Ok(())
 }
@@ -2229,6 +2251,8 @@ fn run_vm_daemon(
 fn run_vm_provision(
     disk_path: &Path,
     login_actions: &[LoginAction],
+    // Text the VM must print for provisioning to count as successful.
+    success_marker: &str,
     directory_shares: &[DirectoryShare],
     prepare_network_backend: impl Fn() -> PreparedNetworkBackend,
     cpu_count: usize,
@@ -2351,6 +2375,7 @@ fn run_vm_provision(
     // Wire hvc0 directly to stdin/stdout so the operator can watch progress.
 
     let output_monitor = Arc::new(OutputMonitor::default());
+    let provision_output = Arc::clone(&output_monitor);
     let io_ctx = spawn_vm_io(
         output_monitor.clone(),
         we_read_from,
@@ -2403,6 +2428,9 @@ fn run_vm_provision(
 
     login_actions_thread.join().ok();
     io_ctx.shutdown();
+    if exit_result.is_ok() && !provision_output.contains(success_marker) {
+        return Err("Provisioning failed; see the output above.".into());
+    }
     exit_result
 }
 
