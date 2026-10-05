@@ -198,12 +198,8 @@ fn attach_console(
             },
         ];
 
-    let project_name = project_root
-        .file_name()
-        .ok_or("Project directory has no name")?
-        .to_string_lossy()
-        .into_owned();
-    all_actions.push(Send(format!(" cd {project_name}")));
+    // The project is mounted at the same path as on the host.
+    all_actions.push(Send(format!(" cd {}", shell_quote(&project_root.to_string_lossy()))));
     all_actions.push(Send(" fish; logout ".to_string()));
 
     if clear {
@@ -640,24 +636,26 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
     let mut masked_guest_paths = Vec::new();
 
     if !args.no_default_mounts {
-        let project_name = project_root
-            .file_name()
-            .ok_or("Project directory has no name")?
-            .to_string_lossy()
-            .into_owned();
+        // Mount the project at the same path as on the host, so host paths (e.g. in
+        // `docker run -v "$PWD":/app` via the forwarded Docker socket) are valid in the guest too.
+        let guest_project_root = project_root.clone();
 
         // Discourage read/write of project dir subfolders within the VM.
         // Note that this isn't secure, since the VM runs as root and could unmount this.
         // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
         for subfolder in [".git", ".vibe"] {
             if project_root.join(subfolder).exists() {
-                login_actions.push(Send(format!(r" mount -t tmpfs tmpfs /root/{project_name}/{}", subfolder)));
-                masked_guest_paths.push(PathBuf::from("/root").join(&project_name).join(subfolder));
+                let masked = guest_project_root.join(subfolder);
+                login_actions.push(Send(format!(
+                    " mount -t tmpfs tmpfs {}",
+                    shell_quote(&masked.to_string_lossy())
+                )));
+                masked_guest_paths.push(masked);
             }
         }
 
         directory_shares.push(
-            DirectoryShare::new(project_root.clone(), PathBuf::from("/root/").join(project_name.clone()), false)
+            DirectoryShare::new(project_root.clone(), guest_project_root.clone(), false)
                 .expect("Project directory must exist"),
         );
 
@@ -668,7 +666,7 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
             directory_shares.push(
                 DirectoryShare::new(
                     env::current_dir()?.join(".vibe").join(subfolder),
-                    PathBuf::from("/root").join(project_name.clone()).join(subfolder),
+                    guest_project_root.join(subfolder),
                     false,
                 )
                     .expect("Project directory must exist"),
@@ -683,7 +681,7 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
                 directory_shares.push(
                     DirectoryShare::new(
                         env::current_dir()?.join(".vibe").join(subfolder),
-                        PathBuf::from("/root").join(project_name.clone()).join(subfolder),
+                        guest_project_root.join(subfolder),
                         false,
                     )
                         .expect("Project directory must exist"),
@@ -785,6 +783,50 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         // Stable across projects, so /var/run/docker.sock can be symlinked to it once.
         cache_dir.join("docker.sock"),
     )
+}
+
+/// Point /var/run/docker.sock at the socket the daemon serves the guest's Docker on (see
+/// spawn_docker_socket_forwarder), so tools using the default path reach the VM. /var/run is
+/// root-owned and cleared on reboot, so this asks for sudo whenever the link is missing. A socket
+/// that's in use by another Docker (Docker Desktop, OrbStack, ...) is left alone.
+fn link_docker_socket() -> Result<(), Box<dyn std::error::Error>> {
+    const SYSTEM_SOCKET: &str = "/var/run/docker.sock";
+    let home = env::var("HOME").map(PathBuf::from)?;
+    let cache_home = env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache"));
+    let docker_socket = cache_home.join("vibe").join("docker.sock");
+
+    if fs::read_link(SYSTEM_SOCKET).is_ok_and(|target| target == docker_socket) {
+        return Ok(());
+    }
+    if UnixStream::connect(SYSTEM_SOCKET).is_ok() {
+        println!(
+            "{SYSTEM_SOCKET} is used by another Docker; the VM's Docker is at {}",
+            docker_socket.display()
+        );
+        return Ok(());
+    }
+
+    let mut sudo = Command::new("sudo");
+    // Without a terminal to type a password into, only proceed if sudo doesn't need one.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        sudo.arg("-n").stderr(Stdio::null());
+    }
+    let linked = sudo
+        .args(["-p", "Password to link /var/run/docker.sock to the VM's Docker: "])
+        .args(["ln", "-sfn"])
+        .arg(&docker_socket)
+        .arg(SYSTEM_SOCKET)
+        .status()
+        .is_ok_and(|status| status.success());
+    if !linked {
+        println!(
+            "Couldn't link {SYSTEM_SOCKET}; the VM's Docker is at {}",
+            docker_socket.display()
+        );
+    }
+    Ok(())
 }
 
 fn provision_vm(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -915,6 +957,8 @@ Options
         }
         // Provision the VM if needed.
         provision_vm(args, project_root.join(".vibe"))?;
+
+        link_docker_socket()?;
 
         // Spawn the daemon by re-execing this binary with --_daemon prepended to
         // the original arguments.  Using Command::spawn (fork+exec) rather than a
@@ -2069,8 +2113,9 @@ fn run_vm_daemon(
         for share in directory_shares {
             let staging = format!("/mnt/shared/{}", share.tag());
             let guest = share.guest.to_string_lossy();
-            all_login_actions.push(Send(format!(" mkdir -p {}", guest)));
-            all_login_actions.push(Send(format!(" mount --bind {} {}", staging, guest)));
+            let (staging, guest) = (shell_quote(&staging), shell_quote(&guest));
+            all_login_actions.push(Send(format!(" mkdir -p {guest}")));
+            all_login_actions.push(Send(format!(" mount --bind {staging} {guest}")));
         }
 
         all_login_actions.push(Send(script_command_from_content(
@@ -2370,8 +2415,9 @@ fn run_vm_provision(
         for share in directory_shares {
             let staging = format!("/mnt/shared/{}", share.tag());
             let guest = share.guest.to_string_lossy();
-            all_login_actions.push(Send(format!(" mkdir -p {}", guest)));
-            all_login_actions.push(Send(format!(" mount --bind {} {}", staging, guest)));
+            let (staging, guest) = (shell_quote(&staging), shell_quote(&guest));
+            all_login_actions.push(Send(format!(" mkdir -p {guest}")));
+            all_login_actions.push(Send(format!(" mount --bind {staging} {guest}")));
         }
     }
 

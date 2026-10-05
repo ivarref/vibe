@@ -12,17 +12,17 @@ $ vibe
   ░▒▓█▓▓█▓▒░ ░▒▓█▓▒░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░
    ░▒▓██▓▒░  ░▒▓█▓▒░▒▓███████▓▒░░▒▓████████▓▒░
 
-Host                                      Guest                    Mode
-----------------------------------------  -----------------------  ----------
-/Users/dev/work/my-project                /root/my-project         read-write
-/Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise  read-write
-/Users/dev/.m2                            /root/.m2                read-write
-/Users/dev/.cargo/registry                /root/.cargo/registry    read-write
-/Users/dev/.codex                         /root/.codex             read-write
-/Users/dev/.claude                        /root/.claude            read-write
-/Users/dev/.gemini                        /root/.gemini            read-write
+Host                                      Guest                       Mode
+----------------------------------------  --------------------------  ----------
+/Users/dev/work/my-project                /Users/dev/work/my-project  read-write
+/Users/dev/.cache/vibe/.guest-mise-cache  /root/.local/share/mise     read-write
+/Users/dev/.m2                            /root/.m2                   read-write
+/Users/dev/.cargo/registry                /root/.cargo/registry       read-write
+/Users/dev/.codex                         /root/.codex                read-write
+/Users/dev/.claude                        /root/.claude               read-write
+/Users/dev/.gemini                        /root/.gemini               read-write
 
-root@vibe:~/my-project#
+root@vibe:/Users/dev/work/my-project#
 ```
 
 On my M1 MacBook Air it takes ~10 seconds to boot.

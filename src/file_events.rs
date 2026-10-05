@@ -251,7 +251,7 @@ pub fn guest_script(shares: &[WatchedShare], masked_guest_paths: &[PathBuf]) -> 
     )
 }
 
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
