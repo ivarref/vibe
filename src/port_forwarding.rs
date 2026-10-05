@@ -99,11 +99,11 @@ impl Forward {
 
 // The guest reports a port right after starting its relay, which may not be listening yet.
 fn vsock_connect_with_retry(device: &Arc<SocketDevice>, port: u16) -> Option<OwnedFd> {
-    for _ in 0..10 {
+    for _ in 0..100 {
         if let Some(fd) = vsock_connect(device, port) {
             return Some(fd);
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(10));
     }
     None
 }
