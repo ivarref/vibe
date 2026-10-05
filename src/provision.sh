@@ -9,7 +9,7 @@ echo 'Acquire::Retries "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 apt-get update
 
 # Upgrade to the latest trixie kernel; it takes effect from the next boot.
-DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-arm64
+DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-arm64 linux-headers-arm64
 
 apt-get install -y --no-install-recommends      \
         cloud-guest-utils                       \
