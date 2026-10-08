@@ -200,7 +200,7 @@ fn attach_console(
 
     // The project is mounted at the same path as on the host.
     all_actions.push(Send(format!(" cd {}", shell_quote(&project_root.to_string_lossy()))));
-    all_actions.push(Send(" fish; logout ".to_string()));
+    all_actions.push(Send(format!(" env SHELL=\"$(which {})\" {}; logout ", valid_shell(), valid_shell())));
 
     if clear {
         all_actions.push(Send(" clear && cat /etc/vibe_motd".to_string()));
@@ -876,6 +876,18 @@ fn provision_vm(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std:
         instance_raw
     };
     Ok(())
+}
+
+
+fn valid_shell() -> String {
+    const VALID_SHELLS: &[&str] = &["fish", "zsh"];
+    let shell = env::var("SHELL").unwrap_or_default();
+    let name = shell.rsplit('/').next().unwrap_or_default();
+    if VALID_SHELLS.contains(&name) {
+        name.to_string()
+    } else {
+        "bash".to_string()
+    }
 }
 
 

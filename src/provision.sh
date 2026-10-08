@@ -8,11 +8,19 @@ echo 'Acquire::Retries "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 
 apt-get update
 
+apt-get install -y --no-install-recommends      \
+        cloud-guest-utils
+
+# Expand disk partition
+growpart /dev/vda 1
+
+# Expand filesystem
+resize2fs /dev/vda1
+
 # Upgrade to the latest trixie kernel; it takes effect from the next boot.
 DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-arm64 linux-headers-arm64
 
 apt-get install -y --no-install-recommends      \
-        cloud-guest-utils                       \
         build-essential                         \
         pkg-config                              \
         libssl-dev                              \
@@ -22,6 +30,7 @@ apt-get install -y --no-install-recommends      \
         sysstat                                 \
         ripgrep                                 \
         fish                                    \
+        zsh                                     \
         inotify-tools                           \
         avahi-daemon                            \
         socat                                   \
@@ -57,12 +66,6 @@ apt install -y --no-install-recommends \
     docker-buildx-plugin \
     docker-compose-plugin
 
-
-# Expand disk partition
-growpart /dev/vda 1
-
-# Expand filesystem
-resize2fs /dev/vda1
 
 # Set hostname to vibe" so it's clear that you're inside the VM.
 hostnamectl set-hostname vibe
