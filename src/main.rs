@@ -200,6 +200,8 @@ fn attach_console(
 
     // The project is mounted at the same path as on the host.
     all_actions.push(Send(format!(" cd {}", shell_quote(&project_root.to_string_lossy()))));
+    let vm_name = &project_root.file_name().expect("project root file_name error").to_string_lossy();
+    all_actions.push(Send(format!(" export VIBE_VM_NAME={}", shell_quote(vm_name))));
     all_actions.push(Send(format!(" env SHELL=\"$(which {})\" {}; logout ", valid_shell(), valid_shell())));
 
     if clear {

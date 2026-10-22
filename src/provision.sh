@@ -37,6 +37,7 @@ apt-get install -y --no-install-recommends      \
         bat                                     \
         bpftrace                                \
         netcat-openbsd                          \
+        neovim                                  \
         ca-certificates
 
 # Install docker (from https://docs.docker.com/engine/install/debian/)
@@ -95,6 +96,8 @@ shopt -s histappend
 # Write history after every command
 PROMPT_COMMAND+=("history -a")
 
+export EDITOR=neovim
+
 export MANPAGER="sh -c 'sed -u -e \"s/\\x1B\[[0-9;]*m//g; s/.\\x08//g\" | bat -p -lman'"
 EOF
 
@@ -139,6 +142,34 @@ ln -sf "$(which batcat)" "$HOME/.local/bin/bat"
 curl https://mise.run | sh
 echo 'eval "$(~/.local/bin/mise activate bash)"' >> .bashrc
 
+cat > "$HOME/.config/fish/config.fish" <<'FISH'
+if status is-interactive
+    # Commands to run in interactive sessions can go here
+    "$HOME/.local/bin/mise" activate fish | source
+
+    function fish_title
+        # If we're connected via ssh, we print the hostname.
+
+        set -l ssh
+        set -q SSH_TTY
+        and set ssh "["(prompt_hostname | string sub -l 10 | string collect)"]"
+        # An override for the current command is passed as the first parameter.
+        # This is used by `fg` to show the true process name, among others.
+        set ssh "[vibe@$VIBE_VM_NAME]"
+        if set -q argv[1]
+            echo -- $ssh (string sub -l 20 -- $argv[1]) (prompt_pwd -d 1 -D 1)
+        else
+            # Don't print "fish" because it's redundant
+            set -l command (status current-command)
+            if test "$command" = fish
+                set command
+            end
+            echo -- $ssh (string sub -l 20 -- $command) (prompt_pwd -d 1 -D 1)
+        end
+    end
+end
+FISH
+
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
 
@@ -148,15 +179,14 @@ cat > .config/mise/config.toml <<MISE
     [settings]
     # Always use the venv created by uv, if available in directory
     python.uv_venv_auto = true
-    experimental = true
     idiomatic_version_file_enable_tools = ["rust"]
 
     # Trust everything by default, since we're already in a VM sandbox
     trusted_config_paths = ["/"]
 
     [tools]
-    uv = "0.9.25"
-    node = "24.13.0"
+    uv = { version = "0.13.4" }
+    watchexec = { version = "2.5.1" }
 MISE
 
 touch .config/mise/mise.lock
