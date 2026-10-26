@@ -6,6 +6,9 @@ echo 'Acquire::http::Timeout "2";' | tee /etc/apt/apt.conf.d/99timeout
 echo 'Acquire::https::Timeout "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 echo 'Acquire::Retries "2";' | tee -a /etc/apt/apt.conf.d/99timeout
 
+export DEBIAN_FRONTEND=noninteractive
+export NONINTERACTIVE=1
+
 apt-get update
 
 apt-get install -y --no-install-recommends      \
@@ -18,7 +21,7 @@ growpart /dev/vda 1
 resize2fs /dev/vda1
 
 # Upgrade to the latest trixie kernel; it takes effect from the next boot.
-DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-arm64 linux-headers-arm64
+apt-get install -y --no-install-recommends linux-image-arm64 linux-headers-arm64
 
 apt-get install -y --no-install-recommends      \
         build-essential                         \
@@ -39,6 +42,8 @@ apt-get install -y --no-install-recommends      \
         netcat-openbsd                          \
         neovim                                  \
         wget                                    \
+        openjdk-25-jdk                          \
+        rlwrap                                  \
         ca-certificates
 
 # Install docker (from https://docs.docker.com/engine/install/debian/)
@@ -59,14 +64,14 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
-apt update
+apt-get update
 
-apt install -y --no-install-recommends \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin
+apt-get install -y --no-install-recommends \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
 
 
 # Set hostname to vibe" so it's clear that you're inside the VM.
@@ -75,7 +80,7 @@ hostnamectl set-hostname vibe
 # Don't display "Last login from ..." on logins
 touch .hushlogin
 
-cat > /root/.bashrc <<EOF
+cat > /root/.bashrc <<'EOF'
 # Set this env var so claude doesn't complain about running as root.
 export IS_SANDBOX=1
 
@@ -103,22 +108,22 @@ export MANPAGER="sh -c 'sed -u -e \"s/\\x1B\[[0-9;]*m//g; s/.\\x08//g\" | bat -p
 EOF
 
 # Shutdown the VM when you logout
-cat > /root/.bash_logout <<EOF
+cat > /root/.bash_logout <<'EOF'
 
-if [[ "/dev/hvc0" == "\$(tty)" ]]; then
+if [[ "/dev/hvc0" == "$(tty)" ]]; then
   # Sync file system before VM poweroff. Otherwise we may lose recent bash history
   sync --file-system /root
   printf 'a' > /dev/hvc1
   sleep 0.1
-elif [[ "/dev/hvc2" == "\$(tty)" ]]; then
+elif [[ "/dev/hvc2" == "$(tty)" ]]; then
   sync --file-system /root
   printf 'b' > /dev/hvc1
   sleep 0.1
-elif [[ "/dev/hvc4" == "\$(tty)" ]]; then
+elif [[ "/dev/hvc4" == "$(tty)" ]]; then
   sync --file-system /root
   printf 'c' > /dev/hvc1
   sleep 0.1
-elif [[ "/dev/hvc6" == "\$(tty)" ]]; then
+elif [[ "/dev/hvc6" == "$(tty)" ]]; then
   sync --file-system /root
   printf 'd' > /dev/hvc1
   sleep 0.1
@@ -176,7 +181,7 @@ eval "$(mise activate bash)"
 
 mkdir -p .config/mise/
 
-cat > .config/mise/config.toml <<MISE
+cat > .config/mise/config.toml <<'MISE'
     [settings]
     # Always use the venv created by uv, if available in directory
     python.uv_venv_auto = true
@@ -192,5 +197,13 @@ MISE
 
 touch .config/mise/mise.lock
 mise install
+
+curl -L -O https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh
+chmod +x linux-install.sh
+sudo ./linux-install.sh
+rm ./linux-install.sh
+
+# Install claude
+curl -fsSL https://claude.ai/install.sh | bash
 
 # Done provisioning. vibe powers off the VM after checking that this script succeeded.
