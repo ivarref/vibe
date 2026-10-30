@@ -9,7 +9,7 @@ use std::{
             io::{AsRawFd, IntoRawFd, OwnedFd},
             net::{UnixListener, UnixStream},
             process::CommandExt,
-        },
+        }
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use std::sync::atomic::{AtomicI32, Ordering};
+use base64::Engine;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use lexopt::prelude::*;
@@ -66,6 +67,41 @@ struct DirectoryShare {
     host: PathBuf,
     guest: PathBuf,
     read_only: bool,
+}
+
+#[derive(Clone)]
+struct FileShare {
+    host: PathBuf,
+    guest: PathBuf,
+}
+
+impl FileShare {
+    fn new(
+        host: PathBuf,
+        mut guest: PathBuf
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if !host.exists() {
+            return Err(format!("Host path does not exist: {}", host.display()).into());
+        }
+        if !guest.is_absolute() {
+            guest = PathBuf::from("/root").join(guest);
+        }
+        Ok(Self {
+            host,
+            guest,
+        })
+    }
+
+    fn from_mount_spec(spec: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid mount spec: {spec}").into());
+        }
+        let host = PathBuf::from(parts[0]);
+        let guest = PathBuf::from(parts[1]);
+        FileShare::new(host, guest)
+    }
+
 }
 
 impl DirectoryShare {
@@ -621,6 +657,30 @@ fn try_acquire_instance_lock(instance_dir: &Path) -> io::Result<Option<libc::c_i
     }
 }
 
+fn setup_file_share(file_share: FileShare) -> Result<(), Box<dyn std::error::Error>> {
+    let path = file_share.host;
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+
+    let guest_fqn = file_share.guest.into_string().unwrap();
+        // .into_string().expect("could not create string of file_share.guest");
+    let mut guest_fqn_b64url = String::new();
+    base64::prelude::BASE64_URL_SAFE_NO_PAD.encode_string(guest_fqn, &mut guest_fqn_b64url);
+
+    let host_hard_link_dir = env::current_dir()?.join(".vibe").join("hardlinks");
+    let host_hard_link_dest = host_hard_link_dir.join(guest_fqn_b64url);
+    if host_hard_link_dest.exists() {
+        fs::remove_file(host_hard_link_dest.clone())?;
+    }
+    // eprintln!("host src is: {}", &abs_path.to_string_lossy());
+    // eprintln!("host stage is: {}", host_hard_link_dest.to_string_lossy());
+    fs::hard_link(abs_path.to_path_buf(), host_hard_link_dest)?;
+    Ok(())
+}
+
 fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let home = env::var("HOME").map(PathBuf::from)?;
     let cache_home = env::var("XDG_CACHE_HOME")
@@ -634,8 +694,16 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
 
     let mut login_actions = Vec::new();
     let mut directory_shares = Vec::new();
+    let mut file_shares = Vec::new();
     // Guest paths hidden under tmpfs, so host changes there shouldn't be forwarded.
     let mut masked_guest_paths = Vec::new();
+
+    let hard_link_dir = env::current_dir()?.join(".vibe").join("hardlinks");
+    if hard_link_dir.clone().exists() {
+        fs::remove_dir_all(hard_link_dir.clone()).expect("Could not delete hardlinks dir");
+    }
+    fs::create_dir_all(hard_link_dir.clone())
+        .expect("Could not create .vibe/hardlinks subfolder");
 
     if !args.no_default_mounts {
         // Mount the project at the same path as on the host, so host paths (e.g. in
@@ -661,13 +729,14 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
                 .expect("Project directory must exist"),
         );
 
+        let dot_vibe_dir = env::current_dir()?.join(".vibe");
         if env::current_dir()?.join("pyproject.toml").exists() {
             let subfolder = ".venv";
-            fs::create_dir_all(env::current_dir()?.join(".vibe").join(subfolder))
-                .expect("Could not create .vibe/ subfolder");
+            fs::create_dir_all(dot_vibe_dir.join(subfolder))
+                .expect("Could not create .vibe/.venv");
             directory_shares.push(
                 DirectoryShare::new(
-                    env::current_dir()?.join(".vibe").join(subfolder),
+                    dot_vibe_dir.join(subfolder),
                     guest_project_root.join(subfolder),
                     false,
                 )
@@ -675,14 +744,15 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
             );
         }
 
+        // make the following folders persistent on the guest, but separate from the host
         for subfolder in ["node_modules", "target", ".cpcache"] {
             if env::current_dir()?.join(subfolder).exists() {
                 // println!(r"creating mapping {}", subfolder);
-                fs::create_dir_all(env::current_dir()?.join(".vibe").join(subfolder))
+                fs::create_dir_all(dot_vibe_dir.join(subfolder))
                     .expect("Could not create .vibe/ subfolder");
                 directory_shares.push(
                     DirectoryShare::new(
-                        env::current_dir()?.join(".vibe").join(subfolder),
+                        dot_vibe_dir.join(subfolder),
                         guest_project_root.join(subfolder),
                         false,
                     )
@@ -718,12 +788,40 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
             " if [ -f /root/.gemini/tmp/bin/rg ] && [ -f /usr/bin/rg ]; then mount --bind /usr/bin/rg /root/.gemini/tmp/bin/rg; fi"
                 .to_string()
         ));
+
+        let claude_config = home.join(".claude.json");
+        if claude_config.exists() {
+            let result = FileShare::new(claude_config, "/root/.claude.json".into())?;
+            setup_file_share(result.clone())?;
+            file_shares.push(result);
+        }
+
     }
 
     let first_user_mount = directory_shares.len();
     for spec in &args.mounts {
         directory_shares.push(DirectoryShare::from_mount_spec(spec)?);
     }
+
+    for spec in &args.file_mounts {
+        let file_share = FileShare::from_mount_spec(spec)?;
+        setup_file_share(file_share.clone())?;
+        file_shares.push(file_share);
+    }
+    if args.file_mounts.len() > 0 || file_shares.len() > 0 {
+        let symlink_share = DirectoryShare::new(hard_link_dir, "/root/.hardlinks".into(), false).expect("Symlink dir not found");
+        directory_shares.push(symlink_share);
+    }
+
+    for file_share in &file_shares {
+        let guest_fqn = file_share.guest.to_path_buf().into_string().unwrap();
+        let mut guest_fqn_b64url = String::new();
+        base64::prelude::BASE64_URL_SAFE_NO_PAD.encode_string(guest_fqn.clone(), &mut guest_fqn_b64url);
+
+        let action = format!(" ln -sf /root/.hardlinks/{} {}", guest_fqn_b64url, shell_quote(&*guest_fqn));
+        login_actions.push(Send(action));
+    }
+
 
     // Forward host file changes for the project directory and user mounts; the other default
     // shares are caches and config dirs that nobody watches, but may see lots of churn.
@@ -750,7 +848,7 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
         )));
     }
 
-    if let Some(motd_action) = create_motd(args.clone(), &directory_shares) {
+    if let Some(motd_action) = create_motd(args.clone(), &directory_shares, &file_shares) {
         login_actions.push(motd_action);
     }
 
@@ -1025,6 +1123,7 @@ struct CliArgs {
     clear: bool,
     no_default_mounts: bool,
     mounts: Vec<String>,
+    file_mounts: Vec<String>,
     login_actions: Vec<LoginAction>,
     network_mode: NetworkMode,
     cpu_count: usize,
@@ -1046,6 +1145,7 @@ fn parse_cli(attach: bool) -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut clear = true;
     let mut no_default_mounts = false;
     let mut mounts = Vec::new();
+    let mut file_mounts = Vec::new();
     let mut login_actions = Vec::new();
     let mut network_mode = NetworkMode::VmnetNat;
     let mut script_index = 0;
@@ -1089,6 +1189,12 @@ fn parse_cli(attach: bool) -> Result<CliArgs, Box<dyn std::error::Error>> {
                     return Err("Cannot specify --mount when attaching to VM".into());
                 }
                 mounts.push(os_to_string(parser.value()?, "--mount")?);
+            }
+            Long("file-mount") => {
+                if attach {
+                    return Err("Cannot specify --file-mount when attaching to VM".into());
+                }
+                file_mounts.push(os_to_string(parser.value()?, "--file-mount")?);
             }
             Long("network") => {
                 if attach {
@@ -1136,6 +1242,7 @@ fn parse_cli(attach: bool) -> Result<CliArgs, Box<dyn std::error::Error>> {
         clear,
         no_default_mounts,
         mounts,
+        file_mounts,
         login_actions,
         network_mode,
         cpu_count,
@@ -1183,7 +1290,7 @@ fn mdns_host_name(name: &str) -> String {
     if label.is_empty() { "vibe".to_string() } else { label.to_string() }
 }
 
-fn create_motd(args: CliArgs, directory_shares: &[DirectoryShare]) -> Option<LoginAction> {
+fn create_motd(args: CliArgs, directory_shares: &[DirectoryShare], file_shares: &[FileShare]) -> Option<LoginAction> {
     if directory_shares.is_empty() {
         return Some(Send(" clear".into()));
     }
@@ -1194,17 +1301,30 @@ fn create_motd(args: CliArgs, directory_shares: &[DirectoryShare]) -> Option<Log
     let mut host_width = host_header.len();
     let mut guest_width = guest_header.len();
     let mut mode_width = mode_header.len();
-    let mut rows = Vec::with_capacity(directory_shares.len());
+    let mut rows = Vec::with_capacity(directory_shares.len() - 1 + file_shares.len());
 
     for share in directory_shares {
         let host = share.host.to_string_lossy().into_owned();
         let guest = share.guest.to_string_lossy().into_owned();
+        if guest == "/root/.hardlinks" {
+            continue
+        }
         let mode = if share.read_only {
             "read-only"
         } else {
             "read-write"
         }
         .to_string();
+        host_width = host_width.max(host.len());
+        guest_width = guest_width.max(guest.len());
+        mode_width = mode_width.max(mode.len());
+        rows.push((host, guest, mode));
+    }
+
+    for share in file_shares {
+        let host = share.host.to_string_lossy().into_owned();
+        let guest = share.guest.to_string_lossy().into_owned();
+        let mode = "read-write".to_string();
         host_width = host_width.max(host.len());
         guest_width = guest_width.max(guest.len());
         mode_width = mode_width.max(mode.len());
@@ -2310,6 +2430,11 @@ fn run_vm_daemon(
     }
     if serving_docker_socket {
         let _ = fs::remove_file(&docker_socket_path);
+    }
+
+    let hard_link_dir = env::current_dir()?.join(".vibe").join("hardlinks");
+    if hard_link_dir.exists() {
+        fs::remove_dir_all(hard_link_dir.clone()).expect("Could not delete hardlinks dir");
     }
 
     exit_result
