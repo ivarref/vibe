@@ -690,8 +690,15 @@ fn main_daemon(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std::
     let cache_dir = cache_home.join("vibe");
     let project_root = env::current_dir()?;
 
-    let vmnet_helper_path = cache_dir.join("vmnet-helper");
-    let prepare_network_backend = || args.network_mode.prepare(&vmnet_helper_path).unwrap();
+    let usernet_helper_path = cache_dir.join("vibe-usernet");
+    // Only persist the networking log for the managed instance disk in `.vibe/`.
+    // For external `--disk` there's no natural per-instance directory to write to, so skip logging.
+    let network_log_dir = args.disk.is_none().then(|| instance_dir.clone());
+    let prepare_network_backend = || {
+        args.network_mode
+            .prepare(&usernet_helper_path, network_log_dir.as_deref())
+            .unwrap()
+    };
 
     let mut login_actions = Vec::new();
     let mut directory_shares = Vec::new();
@@ -937,8 +944,12 @@ fn provision_vm(args: CliArgs, instance_dir: PathBuf) -> Result<(), Box<dyn std:
         .unwrap_or_else(|_| home.join(".cache"));
     let cache_dir = cache_home.join("vibe");
 
-    let vmnet_helper_path = cache_dir.join("vmnet-helper");
-    let prepare_network_backend = || args.network_mode.prepare(&vmnet_helper_path).unwrap();
+    let usernet_helper_path = cache_dir.join("vibe-usernet");
+    let prepare_network_backend = || {
+        args.network_mode
+            .prepare(&usernet_helper_path, None)
+            .unwrap()
+    };
 
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
@@ -1019,9 +1030,9 @@ Options
   --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
                                                             Defaults to read-write.
                                                             Errors if host-path does not exist.
-  --network [nat | vznat | <bridge interface>]              Guest networking mode (default `nat`).
-                                                            Providing an interface (e.g., `en0`) exposes the VM on that interface.
-                                                            This is just like plugging it in, so it'll get its own IP address, be able to accept incoming connections, etc.
+  --network [nat | vznat]                                   Guest networking mode (default `nat`).
+                                                            `nat` uses Vibe's bundled user-mode network stack.
+                                                            `vznat` uses Apple's VZNATNetworkDeviceAttachment fallback.
 
   --cpus <count>                                            Number of virtual CPUs (default 2).
   --ram <megabytes>                                         RAM size in megabytes (default 2048).
@@ -1148,7 +1159,7 @@ fn parse_cli(attach: bool) -> Result<CliArgs, Box<dyn std::error::Error>> {
     let mut mounts = Vec::new();
     let mut file_mounts = Vec::new();
     let mut login_actions = Vec::new();
-    let mut network_mode = NetworkMode::VmnetNat;
+    let mut network_mode = NetworkMode::Nat;
     let mut script_index = 0;
     let mut cpu_count = DEFAULT_CPU_COUNT;
     let mut ram_bytes = DEFAULT_RAM_BYTES;
@@ -1202,7 +1213,7 @@ fn parse_cli(attach: bool) -> Result<CliArgs, Box<dyn std::error::Error>> {
                     return Err("Cannot specify --network when attaching to VM".into());
                 }
                 let value = os_to_string(parser.value()?, "--network")?;
-                network_mode = NetworkMode::parse(&value);
+                network_mode = NetworkMode::parse(&value)?;
             }
             Long("script") => {
                 login_actions.push(Script {
@@ -1839,10 +1850,17 @@ fn create_vm_configuration(
                 PreparedNetworkBackend::VzNat => {
                     network_device.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
                 }
-                PreparedNetworkBackend::VmnetHelper { vm_socket_fd, .. } => {
+                PreparedNetworkBackend::Usernet { vm_socket_fd, .. } => {
+                    let mac_address = VZMACAddress::initWithString(
+                        VZMACAddress::alloc(),
+                        &NSString::from_str(USERNET_MAC_ADDRESS),
+                    )
+                    .ok_or_else(|| io::Error::other("invalid usernet MAC address"))?;
+                    network_device.setMACAddress(&mac_address);
+
                     let network_fd = vm_socket_fd
                         .take()
-                        .ok_or_else(|| io::Error::other("vmnet-helper socket already consumed"))?;
+                        .ok_or_else(|| io::Error::other("vibe-usernet socket already consumed"))?;
                     let file_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
                         NSFileHandle::alloc(),
                         network_fd.into_raw_fd(),

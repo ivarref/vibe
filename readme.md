@@ -58,7 +58,7 @@ Finally, as a matter of taste and style:
 
 ## Install
 
-Vibe is a single binary built with Rust.
+Vibe is a single binary built with Rust, with a [bundled networking helper](/helpers/vibe-usernet) written in Go.
 
 Download [the latest binary built by GitHub actions](https://github.com/lynaghk/vibe/releases/tag/latest) and put it somewhere on your `$PATH`:
 
@@ -79,6 +79,11 @@ You can also install via cargo:
 
     cargo install --locked --git https://github.com/lynaghk/vibe.git
 
+Building from a checkout requires a Go compiler; you can get one via mise:
+
+    mise install
+    cargo build
+
 
 ## Using Vibe
 
@@ -93,9 +98,9 @@ Options
   --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
                                                             Defaults to read-write.
                                                             Errors if host-path does not exist.
-  --network [nat | vznat | <bridge interface>]              Guest networking mode (default `nat`).
-                                                            Providing an interface (e.g., `en0`) exposes the VM on that interface.
-                                                            This is just like plugging it in, so it'll get its own IP address, be able to accept incoming connections, etc.
+  --network [nat | vznat]                                   Guest networking mode (default `nat`).
+                                                            `nat` uses Vibe's bundled user-mode network stack.
+                                                            `vznat` uses Apple's VZNATNetworkDeviceAttachment.
 
   --cpus <count>                                            Number of virtual CPUs (default 2).
   --ram <megabytes>                                         RAM size in megabytes (default 2048).
@@ -125,8 +130,9 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
 ## Other notes
 
 - Apple's [VZNATNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vznatnetworkdeviceattachment) loses packets and VMs get wrecked whenever host networking changes (e.g., switching between wifi/ethernet/VPN) and [VZBridgedNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzbridgednetworkdeviceattachment) requires kowtowing to acquire the restricted [com.apple.vm.networking](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.vm.networking) entitlement.
-  To achieve reliable networking, Vibe bundles the [vmnet-helper](https://github.com/lynaghk/vmnet-helper) and automatically runs it for your VMs.
-  On MacOS < 26, this requires some sudoers magic --- if necessary, Vibe will give you the appropriate incantations to run.
+  To achieve reliable networking, Vibe bundles a gVisor/Lima-style user-mode network stack ([vibe-usernet](/helpers/vibe-usernet)) and runs it automatically for your VMs.
+  The guest is at `192.168.5.15`, the gateway at `192.168.5.2`, and DNS is handled by the host resolver so you get VPN and split-DNS compatibility.
+  The helper's stderr is logged to `.vibe/vibe-usernet.log`.
   
 - The default VM disk is 20 GiB, but only uses about 2.5 GiB.
   Since Apple Filesystem is copy-on-write and doesn't count zeros, disk space is only used when you actually write new blocks.
